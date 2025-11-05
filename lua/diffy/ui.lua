@@ -50,8 +50,8 @@ function M.open_diff_window(diff_data)
     title = ' Original ',
     title_pos = 'center'
   })
-  vim.wo[left_win].signcolumn = 'yes:1'
   vim.wo[left_win].number = false
+  vim.wo[left_win].wrap = false
 
   -- Create right content window
   right_win = vim.api.nvim_open_win(right_buf, true, {
@@ -65,12 +65,11 @@ function M.open_diff_window(diff_data)
     title = ' Modified ',
     title_pos = 'center'
   })
-  vim.wo[right_win].signcolumn = 'yes:1'
   vim.wo[right_win].number = false
+  vim.wo[right_win].wrap = false
 
-  -- Apply highlighting and signs
+  -- Apply highlighting
   M.apply_highlighting(left_buf, right_buf, diff_data)
-  M.apply_signs(left_buf, right_buf, diff_data)
 
   -- Set up synchronized scrolling
   M.setup_scroll_sync()
@@ -111,26 +110,6 @@ function M.apply_highlighting(left, right, diff_data)
   
   for _, line_num in ipairs(diff_data.right_highlights or {}) do
     vim.api.nvim_buf_add_highlight(right, diffy_namespace, 'DiffAdd', line_num - 1, 0, -1)
-  end
-end
-
--- Apply signs for line numbers with +/- indicators
-function M.apply_signs(left, right, diff_data)
-  -- Define sign types
-  vim.fn.sign_define('DiffyContext', { text = '  ', texthl = 'LineNr' })
-  vim.fn.sign_define('DiffyRemove', { text = '- ', texthl = 'DiffDelete' })
-  vim.fn.sign_define('DiffyAdd', { text = '+ ', texthl = 'DiffAdd' })
-  
-  -- Place signs on left buffer
-  for i, line_num_text in ipairs(diff_data.left_line_nums) do
-    local sign_type = line_num_text:match('^%-') and 'DiffyRemove' or 'DiffyContext'
-    vim.fn.sign_place(0, 'diffy', sign_type, left, { lnum = i })
-  end
-  
-  -- Place signs on right buffer
-  for i, line_num_text in ipairs(diff_data.right_line_nums) do
-    local sign_type = line_num_text:match('^%+') and 'DiffyAdd' or 'DiffyContext'
-    vim.fn.sign_place(0, 'diffy', sign_type, right, { lnum = i })
   end
 end
 
