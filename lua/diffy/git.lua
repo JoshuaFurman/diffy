@@ -86,6 +86,8 @@ function M.parse_and_align_diff(diff_text)
   local right_content = {}
   local left_highlights = {}
   local right_highlights = {}
+  local left_line_info = {}
+  local right_line_info = {}
   local left_num = 0
   local right_num = 0
   local display_line = 0
@@ -106,21 +108,27 @@ function M.parse_and_align_diff(diff_text)
         left_num = left_num + 1
         right_num = right_num + 1
         display_line = display_line + 1
-        table.insert(left_content, string.format('  %4d │ %s', left_num, content))
-        table.insert(right_content, string.format('  %4d │ %s', right_num, content))
+        table.insert(left_content, content)
+        table.insert(right_content, content)
+        table.insert(left_line_info, { num = left_num, type = 'context' })
+        table.insert(right_line_info, { num = right_num, type = 'context' })
       elseif prefix == '-' then
         -- Removed line - only on left
         left_num = left_num + 1
         display_line = display_line + 1
-        table.insert(left_content, string.format('- %4d │ %s', left_num, content))
-        table.insert(right_content, string.format('       │ '))
+        table.insert(left_content, content)
+        table.insert(right_content, '')
+        table.insert(left_line_info, { num = left_num, type = 'remove' })
+        table.insert(right_line_info, { num = nil, type = 'empty' })
         table.insert(left_highlights, display_line)
       elseif prefix == '+' then
         -- Added line - only on right
         right_num = right_num + 1
         display_line = display_line + 1
-        table.insert(left_content, string.format('       │ '))
-        table.insert(right_content, string.format('+ %4d │ %s', right_num, content))
+        table.insert(left_content, '')
+        table.insert(right_content, content)
+        table.insert(left_line_info, { num = nil, type = 'empty' })
+        table.insert(right_line_info, { num = right_num, type = 'add' })
         table.insert(right_highlights, display_line)
       end
     end
@@ -131,6 +139,8 @@ function M.parse_and_align_diff(diff_text)
     right_content = right_content,
     left_highlights = left_highlights,
     right_highlights = right_highlights,
+    left_line_info = left_line_info,
+    right_line_info = right_line_info,
   }
 end
 

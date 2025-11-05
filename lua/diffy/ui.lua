@@ -68,8 +68,9 @@ function M.open_diff_window(diff_data)
   vim.wo[right_win].number = false
   vim.wo[right_win].wrap = false
 
-  -- Apply highlighting
+  -- Apply highlighting and line numbers
   M.apply_highlighting(left_buf, right_buf, diff_data)
+  M.apply_line_numbers(left_buf, right_buf, diff_data)
 
   -- Set up synchronized scrolling
   M.setup_scroll_sync()
@@ -110,6 +111,53 @@ function M.apply_highlighting(left, right, diff_data)
   
   for _, line_num in ipairs(diff_data.right_highlights or {}) do
     vim.api.nvim_buf_add_highlight(right, diffy_namespace, 'DiffAdd', line_num - 1, 0, -1)
+  end
+end
+
+-- Apply line numbers as virtual text
+function M.apply_line_numbers(left, right, diff_data)
+  -- Apply line numbers to left buffer
+  for i, info in ipairs(diff_data.left_line_info or {}) do
+    local text
+    local hl
+    if info.type == 'context' then
+      text = string.format('  %4d │ ', info.num)
+      hl = 'LineNr'
+    elseif info.type == 'remove' then
+      text = string.format('- %4d │ ', info.num)
+      hl = 'DiffDelete'
+    else
+      text = '       │ '
+      hl = 'LineNr'
+    end
+    
+    vim.api.nvim_buf_set_extmark(left, diffy_namespace, i - 1, 0, {
+      virt_text = {{text, hl}},
+      virt_text_pos = 'inline',
+      priority = 100,
+    })
+  end
+  
+  -- Apply line numbers to right buffer
+  for i, info in ipairs(diff_data.right_line_info or {}) do
+    local text
+    local hl
+    if info.type == 'context' then
+      text = string.format('  %4d │ ', info.num)
+      hl = 'LineNr'
+    elseif info.type == 'add' then
+      text = string.format('+ %4d │ ', info.num)
+      hl = 'DiffAdd'
+    else
+      text = '       │ '
+      hl = 'LineNr'
+    end
+    
+    vim.api.nvim_buf_set_extmark(right, diffy_namespace, i - 1, 0, {
+      virt_text = {{text, hl}},
+      virt_text_pos = 'inline',
+      priority = 100,
+    })
   end
 end
 
