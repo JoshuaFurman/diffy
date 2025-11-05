@@ -4,126 +4,151 @@ local M = {}
 function M.get_diff(file_path, target)
   local Job = require('plenary.job')
 
-  -- Check if file exists and is in a git repo
   if vim.fn.filereadable(file_path) == 0 then
     vim.notify('File does not exist: ' .. file_path, vim.log.levels.ERROR)
     return nil
   end
 
-  -- Determine diff command based on target
-  local cmd
-  if target == 'staged' then
-    cmd = { 'git', 'diff', '--cached', file_path }
-  elseif target == 'head' or target == '' then
-    cmd = { 'git', 'diff', 'HEAD', file_path }
-  else
-    -- Assume target is a commit hash
-    cmd = { 'git', 'show', target .. ':' .. vim.fn.fnamemodify(file_path, ':p:t') }
+  -- Get git root directory
+  local git_root = M.get_git_root(file_path)
+  if not git_root then
+    vim.notify('Not in a git repository', vim.log.levels.WARN)
+    return nil
   end
 
+  -- Get relative path from git root
+  local rel_path = vim.fn.fnamemodify(file_path, ':p'):sub(#git_root + 2)
+
+  -- Get git diff
+  local diff_output = M.get_git_diff(git_root, rel_path, target)
+  if not diff_output or diff_output == '' then
+    vim.notify('No changes to display', vim.log.levels.INFO)
+    return nil
+  end
+
+  -- Parse diff and build aligned content
+  return M.parse_and_align_diff(diff_output)
+end
+
+-- Get git root directory
+function M.get_git_root(file_path)
+  local Job = require('plenary.job')
+  
   local job = Job:new({
-    command = cmd[1],
-    args = vim.list_slice(cmd, 2),
+    command = 'git',
+    args = { 'rev-parse', '--show-toplevel' },
     cwd = vim.fn.fnamemodify(file_path, ':p:h'),
   })
 
   local result = job:sync()
-
-  if job.code ~= 0 and #result == 0 then
-    vim.notify('Failed to get diff for: ' .. file_path, vim.log.levels.WARN)
+  
+  if job.code ~= 0 or #result == 0 then
     return nil
   end
 
+  return result[1]
+end
+
+-- Get git diff output
+function M.get_git_diff(git_root, rel_path, target)
+  local Job = require('plenary.job')
+  
+  local args
+  if target == 'staged' then
+    args = { 'diff', '--cached', '--no-color', '--no-ext-diff', '-U999999', rel_path }
+  elseif target and target ~= '' then
+    -- Compare specific commit/ref to working directory
+    args = { 'diff', '--no-color', '--no-ext-diff', '-U999999', target, '--', rel_path }
+  else
+    -- Default: compare HEAD to working directory
+    args = { 'diff', '--no-color', '--no-ext-diff', '-U999999', 'HEAD', '--', rel_path }
+  end
+  
+  -- Debug: print the command
+  print('Running: git ' .. table.concat(args, ' '))
+  print('In directory: ' .. git_root)
+  
+  local job = Job:new({
+    command = 'git',
+    args = args,
+    cwd = git_root,
+  })
+
+  local result = job:sync()
+  
+  print('Result lines: ' .. #result)
+  print('Exit code: ' .. job.code)
+  
   if #result == 0 then
     return nil
   end
 
-  return M.parse_diff(table.concat(result, '\n'))
+  return table.concat(result, '\n')
 end
 
--- Parse unified diff format
-function M.parse_diff(diff_text)
+-- Parse diff and create aligned content for side-by-side view
+function M.parse_and_align_diff(diff_text)
   local lines = vim.split(diff_text, '\n')
-  local hunks = {}
-  local current_hunk = nil
+  local left_content = {}
+  local right_content = {}
+  local left_highlights = {}
+  local right_highlights = {}
+  local left_line_nums = {}
+  local right_line_nums = {}
+  local left_num = 0
+  local right_num = 0
+  local display_line = 0
 
   for _, line in ipairs(lines) do
     if line:match('^@@') then
-      -- New hunk
-      if current_hunk then
-        table.insert(hunks, current_hunk)
-      end
-
-      local old_start, old_count, new_start, new_count = line:match('@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@')
-      current_hunk = {
-        old_start = tonumber(old_start) or 0,
-        old_count = tonumber(old_count) or 0,
-        new_start = tonumber(new_start) or 0,
-        new_count = tonumber(new_count) or 0,
-        lines = {}
-      }
-    elseif current_hunk then
+      -- Parse hunk header to get line numbers
+      local old_start = line:match('@@ %-(%d+)')
+      local new_start = line:match('%+(%d+)')
+      left_num = tonumber(old_start) - 1
+      right_num = tonumber(new_start) - 1
+    elseif not (line:match('^%-%-%-') or line:match('^%+%+%+') or line:match('^diff') or line:match('^index')) then
       local prefix = line:sub(1, 1)
       local content = line:sub(2)
-
+      
       if prefix == ' ' then
-        -- Context line
-        table.insert(current_hunk.lines, { type = 'context', content = content })
+        -- Context line - same on both sides
+        left_num = left_num + 1
+        right_num = right_num + 1
+        display_line = display_line + 1
+        table.insert(left_content, content)
+        table.insert(right_content, content)
+        table.insert(left_line_nums, '  ' .. left_num)
+        table.insert(right_line_nums, '  ' .. right_num)
       elseif prefix == '-' then
-        -- Removed line
-        table.insert(current_hunk.lines, { type = 'remove', content = content })
+        -- Removed line - only on left
+        left_num = left_num + 1
+        display_line = display_line + 1
+        table.insert(left_content, content)
+        table.insert(right_content, '')
+        table.insert(left_line_nums, '- ' .. left_num)
+        table.insert(right_line_nums, '  ')
+        table.insert(left_highlights, display_line)
       elseif prefix == '+' then
-        -- Added line
-        table.insert(current_hunk.lines, { type = 'add', content = content })
+        -- Added line - only on right
+        right_num = right_num + 1
+        display_line = display_line + 1
+        table.insert(left_content, '')
+        table.insert(right_content, content)
+        table.insert(left_line_nums, '  ')
+        table.insert(right_line_nums, '+ ' .. right_num)
+        table.insert(right_highlights, display_line)
       end
     end
-  end
-
-  -- Add final hunk
-  if current_hunk then
-    table.insert(hunks, current_hunk)
   end
 
   return {
-    hunks = hunks,
-    left_content = M.build_side_content(hunks, 'left'),
-    right_content = M.build_side_content(hunks, 'right')
+    left_content = left_content,
+    right_content = right_content,
+    left_highlights = left_highlights,
+    right_highlights = right_highlights,
+    left_line_nums = left_line_nums,
+    right_line_nums = right_line_nums
   }
-end
-
--- Build content for one side of the diff
-function M.build_side_content(hunks, side)
-  local content = {}
-  local line_num = 1
-
-  for _, hunk in ipairs(hunks) do
-    -- Add context lines before hunk
-    for i = 1, hunk.old_start - line_num do
-      table.insert(content, '')
-    end
-
-    -- Add hunk lines
-    for _, line in ipairs(hunk.lines) do
-      _ = line -- Mark as used
-      if side == 'left' then
-        if line.type == 'remove' or line.type == 'context' then
-          table.insert(content, line.content)
-        elseif line.type == 'add' then
-          table.insert(content, '')
-        end
-      else -- right side
-        if line.type == 'add' or line.type == 'context' then
-          table.insert(content, line.content)
-        elseif line.type == 'remove' then
-          table.insert(content, '')
-        end
-      end
-    end
-
-    line_num = hunk.new_start + hunk.new_count
-  end
-
-  return content
 end
 
 return M
