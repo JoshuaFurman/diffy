@@ -64,10 +64,6 @@ function M.get_git_diff(git_root, rel_path, target)
     args = { 'diff', '--no-color', '--no-ext-diff', '-U999999', 'HEAD', '--', rel_path }
   end
   
-  -- Debug: print the command
-  print('Running: git ' .. table.concat(args, ' '))
-  print('In directory: ' .. git_root)
-  
   local job = Job:new({
     command = 'git',
     args = args,
@@ -75,9 +71,6 @@ function M.get_git_diff(git_root, rel_path, target)
   })
 
   local result = job:sync()
-  
-  print('Result lines: ' .. #result)
-  print('Exit code: ' .. job.code)
   
   if #result == 0 then
     return nil
