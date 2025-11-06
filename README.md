@@ -16,7 +16,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
 {
-  'yourusername/diffy.nvim',
+  'JoshuaFurman/diffy',
   dependencies = { 'nvim-lua/plenary.nvim' },
   config = function()
     require('diffy').setup()
@@ -28,7 +28,7 @@ Using [packer.nvim](https://github.com/wbthomason/packer.nvim):
 
 ```lua
 use {
-  'yourusername/diffy.nvim',
+  'JoshuaFurman/diffy',
   requires = { 'nvim-lua/plenary.nvim' },
   config = function()
     require('diffy').setup()
