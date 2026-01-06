@@ -27,17 +27,26 @@ index 1234567..abcdef0 100644
 	assert(#result.left_content > 0, "Left content is empty")
 	assert(#result.right_content > 0, "Right content is empty")
 
-	-- Verify content alignment
+	-- Verify content alignment (GitHub-style pairing)
 	-- Line 1 is context
 	assert(result.left_content[1] == "line 1", "Expected line 1 context")
 	assert(result.right_content[1] == "line 1", "Expected line 1 context")
 
-	-- Line 2 changed
-	assert(result.left_content[2] == "line 2", "Expected line 2 removed")
-	assert(result.right_content[2] == "", "Expected line 2 empty in right")
+	-- Line 2: deletion paired with addition (GitHub-style)
+	assert(result.left_content[2] == "line 2", "Expected line 2 removed on left")
+	assert(result.right_content[2] == "modified line 2", "Expected modified line 2 on right (paired)")
 
-	assert(result.left_content[3] == "", "Expected line 3 empty in left")
-	assert(result.right_content[3] == "modified line 2", "Expected line 3 added in right")
+	-- Line 3 is context
+	assert(result.left_content[3] == "line 3", "Expected line 3 context")
+	assert(result.right_content[3] == "line 3", "Expected line 3 context")
+
+	-- Line 4: pure addition (empty on left)
+	assert(result.left_content[4] == "", "Expected line 4 empty in left")
+	assert(result.right_content[4] == "new line 4", "Expected new line 4 added in right")
+
+	-- Verify word_diffs exists for paired modification
+	assert(result.word_diffs, "Expected word_diffs table")
+	assert(result.word_diffs[2], "Expected word diff for line 2 (paired modification)")
 
 	print("✓ Git parsing test passed")
 end

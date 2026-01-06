@@ -77,7 +77,53 @@ function M.get_git_diff(git_root, rel_path, target)
   return table.concat(result, '\n')
 end
 
+-- Compute word-level diff between two lines
+-- Returns table with left and right highlight ranges, or nil if no diff
+function M.compute_word_diff(old_line, new_line)
+  if old_line == new_line then
+    return nil
+  end
+
+  -- Find common prefix
+  local prefix_len = 0
+  local min_len = math.min(#old_line, #new_line)
+  while prefix_len < min_len do
+    if old_line:sub(prefix_len + 1, prefix_len + 1) == new_line:sub(prefix_len + 1, prefix_len + 1) then
+      prefix_len = prefix_len + 1
+    else
+      break
+    end
+  end
+
+  -- Find common suffix (don't overlap with prefix)
+  local suffix_len = 0
+  local max_suffix = min_len - prefix_len
+  while suffix_len < max_suffix do
+    if old_line:sub(#old_line - suffix_len, #old_line - suffix_len) == new_line:sub(#new_line - suffix_len, #new_line - suffix_len) then
+      suffix_len = suffix_len + 1
+    else
+      break
+    end
+  end
+
+  local old_diff_start = prefix_len
+  local old_diff_end = #old_line - suffix_len
+  local new_diff_start = prefix_len
+  local new_diff_end = #new_line - suffix_len
+
+  -- Only return if there's actually a different region
+  if old_diff_start < old_diff_end or new_diff_start < new_diff_end then
+    return {
+      left = { start = old_diff_start, stop = old_diff_end },
+      right = { start = new_diff_start, stop = new_diff_end },
+    }
+  end
+
+  return nil
+end
+
 -- Parse diff and create aligned content for side-by-side view
+-- Uses GitHub-style pairing: consecutive deletions and additions are zipped together
 function M.parse_and_align_diff(diff_text)
   local lines = vim.split(diff_text, '\n')
   local left_content = {}
@@ -86,16 +132,70 @@ function M.parse_and_align_diff(diff_text)
   local right_highlights = {}
   local left_line_info = {}
   local right_line_info = {}
+  local word_diffs = {}
   local left_num = 0
   local right_num = 0
   local display_line = 0
 
+  -- Buffers for collecting consecutive changes
+  local pending_removes = {}
+  local pending_adds = {}
+
+  -- Flush pending changes by pairing deletions with additions
+  local function flush_pending()
+    local max_len = math.max(#pending_removes, #pending_adds)
+
+    for i = 1, max_len do
+      display_line = display_line + 1
+      local remove = pending_removes[i]
+      local add = pending_adds[i]
+
+      if remove and add then
+        -- Paired modification - both sides have content
+        table.insert(left_content, remove.content)
+        table.insert(right_content, add.content)
+        table.insert(left_line_info, { num = remove.num, type = 'remove' })
+        table.insert(right_line_info, { num = add.num, type = 'add' })
+        table.insert(left_highlights, display_line)
+        table.insert(right_highlights, display_line)
+
+        -- Compute word-diff if both have non-empty content
+        if remove.content ~= '' and add.content ~= '' then
+          local wd = M.compute_word_diff(remove.content, add.content)
+          if wd then
+            word_diffs[display_line] = wd
+          end
+        end
+      elseif remove then
+        -- Pure deletion - only left side has content
+        table.insert(left_content, remove.content)
+        table.insert(right_content, '')
+        table.insert(left_line_info, { num = remove.num, type = 'remove' })
+        table.insert(right_line_info, { num = nil, type = 'empty' })
+        table.insert(left_highlights, display_line)
+      else
+        -- Pure addition - only right side has content
+        table.insert(left_content, '')
+        table.insert(right_content, add.content)
+        table.insert(left_line_info, { num = nil, type = 'empty' })
+        table.insert(right_line_info, { num = add.num, type = 'add' })
+        table.insert(right_highlights, display_line)
+      end
+    end
+
+    pending_removes = {}
+    pending_adds = {}
+  end
+
   for _, line in ipairs(lines) do
     if line:match('^@@') then
+      -- Flush any pending changes before processing hunk header
+      flush_pending()
+
       -- Parse hunk header to get line numbers
       local old_start = line:match('@@ %-(%d+)')
       local new_start = line:match('%+(%d+)')
-      
+
       if old_start and new_start then
         -- If this is not the first hunk (display_line > 0), add a separator line
         if display_line > 0 then
@@ -112,9 +212,10 @@ function M.parse_and_align_diff(diff_text)
     elseif not (line:match('^%-%-%-') or line:match('^%+%+%+') or line:match('^diff') or line:match('^index')) then
       local prefix = line:sub(1, 1)
       local content = line:sub(2)
-      
+
       if prefix == ' ' then
-        -- Context line - same on both sides
+        -- Context line - flush pending changes first, then add context
+        flush_pending()
         left_num = left_num + 1
         right_num = right_num + 1
         display_line = display_line + 1
@@ -123,26 +224,19 @@ function M.parse_and_align_diff(diff_text)
         table.insert(left_line_info, { num = left_num, type = 'context' })
         table.insert(right_line_info, { num = right_num, type = 'context' })
       elseif prefix == '-' then
-        -- Removed line - only on left
+        -- Removed line - buffer it for pairing
         left_num = left_num + 1
-        display_line = display_line + 1
-        table.insert(left_content, content)
-        table.insert(right_content, '')
-        table.insert(left_line_info, { num = left_num, type = 'remove' })
-        table.insert(right_line_info, { num = nil, type = 'empty' })
-        table.insert(left_highlights, display_line)
+        table.insert(pending_removes, { content = content, num = left_num })
       elseif prefix == '+' then
-        -- Added line - only on right
+        -- Added line - buffer it for pairing
         right_num = right_num + 1
-        display_line = display_line + 1
-        table.insert(left_content, '')
-        table.insert(right_content, content)
-        table.insert(left_line_info, { num = nil, type = 'empty' })
-        table.insert(right_line_info, { num = right_num, type = 'add' })
-        table.insert(right_highlights, display_line)
+        table.insert(pending_adds, { content = content, num = right_num })
       end
     end
   end
+
+  -- Flush any remaining pending changes
+  flush_pending()
 
   return {
     left_content = left_content,
@@ -151,6 +245,7 @@ function M.parse_and_align_diff(diff_text)
     right_highlights = right_highlights,
     left_line_info = left_line_info,
     right_line_info = right_line_info,
+    word_diffs = word_diffs,
   }
 end
 

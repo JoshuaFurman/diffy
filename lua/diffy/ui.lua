@@ -344,13 +344,23 @@ end
 
 -- Apply syntax highlighting to diff content
 function M.apply_highlighting(left, right, diff_data)
-	-- Apply diff-specific highlighting
+	-- Apply full-line background highlighting for changes
 	for _, line_num in ipairs(diff_data.left_highlights or {}) do
 		vim.api.nvim_buf_add_highlight(left, diffy_namespace, "DiffDelete", line_num - 1, 0, -1)
 	end
 
 	for _, line_num in ipairs(diff_data.right_highlights or {}) do
 		vim.api.nvim_buf_add_highlight(right, diffy_namespace, "DiffAdd", line_num - 1, 0, -1)
+	end
+
+	-- Apply word-level highlighting for paired changes
+	for line_num, wd in pairs(diff_data.word_diffs or {}) do
+		if wd.left and wd.left.start < wd.left.stop then
+			vim.api.nvim_buf_add_highlight(left, diffy_namespace, "DiffText", line_num - 1, wd.left.start, wd.left.stop)
+		end
+		if wd.right and wd.right.start < wd.right.stop then
+			vim.api.nvim_buf_add_highlight(right, diffy_namespace, "DiffText", line_num - 1, wd.right.start, wd.right.stop)
+		end
 	end
 end
 

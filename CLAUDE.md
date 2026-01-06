@@ -36,20 +36,23 @@ The plugin follows a three-module architecture:
    - `get_diff(file_path, target)` - Main function that coordinates git operations
    - `get_git_root()` - Finds repository root using plenary.job
    - `get_git_diff()` - Executes git diff with high context (-U999999)
-   - `parse_and_align_diff()` - **Core logic**: Parses unified diff format and builds aligned left/right content arrays with line tracking
-   - Returns diff_data table with: left_content, right_content, left_highlights, right_highlights, left_line_info, right_line_info
+   - `compute_word_diff(old_line, new_line)` - Computes character-level diff ranges using prefix/suffix matching
+   - `parse_and_align_diff()` - **Core logic**: Parses unified diff format using GitHub-style pairing (consecutive deletions and additions are zipped together side-by-side)
+   - Returns diff_data table with: left_content, right_content, left_highlights, right_highlights, left_line_info, right_line_info, word_diffs
 
 3. **lua/diffy/ui.lua** - Window management and display
    - `open_diff_window(diff_data)` - Creates side-by-side floating windows
    - `apply_line_numbers()` - Uses extmarks with virtual text to display line numbers inline (format: `  1234 │ ` for context, `- 1234 │ ` for deletions, `+ 1234 │ ` for additions)
-   - `apply_highlighting()` - Applies DiffDelete/DiffAdd highlights
+   - `apply_highlighting()` - Applies DiffDelete/DiffAdd highlights for full lines, plus DiffText for word-level changes within paired modifications
    - `setup_scroll_sync()` - Bidirectional scroll synchronization via CursorMoved autocmds
-   - `setup_keymaps()` - Binds q/Esc/Ctrl-c to close windows
+   - `setup_keymaps()` - Binds q/Esc/Ctrl-c to close, n/p for hunk navigation
 
 ### Key Design Patterns
 
-- **Diff Alignment**: git.lua's `parse_and_align_diff()` creates aligned arrays where removed lines show on left with empty right, added lines show on right with empty left, and context lines appear on both sides
+- **GitHub-Style Diff Pairing**: git.lua's `parse_and_align_diff()` uses buffered parsing - consecutive deletions and additions are collected and then "zipped" together side-by-side. This matches GitHub's split-view behavior where a deletion followed by additions appears as paired rows rather than separate deletion/addition rows.
+- **Word-Level Highlighting**: For paired modifications (deletion + addition on same row), `compute_word_diff()` finds the common prefix/suffix and highlights only the changed portion using `DiffText` on top of the line background.
 - **Line Number Tracking**: Each display line tracks its original line number via left_line_info/right_line_info tables with `{num, type}` where type is 'context', 'remove', 'add', 'empty', or 'separator'
+- **Hunk Navigation**: ui.lua tracks hunk start positions and provides n/p navigation to jump between change regions
 - **Async Git Operations**: All git commands use plenary.job:sync() for non-blocking execution
 - **Window Lifecycle**: Windows and buffers are stored in module-level variables and cleaned up on close
 
@@ -69,4 +72,7 @@ The plugin follows a three-module architecture:
 :Diffy <commit>  # Diff against specific commit
 ```
 
-Inside diff window: `q`, `<Esc>`, or `<C-c>` to close
+Inside diff window:
+- `q`, `<Esc>`, or `<C-c>` to close
+- `n` to jump to next hunk
+- `p` to jump to previous hunk
