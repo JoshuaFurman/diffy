@@ -9,6 +9,7 @@ local left_buf = nil
 local right_buf = nil
 local footer_win = nil
 local footer_buf = nil
+local footer_total_width = nil -- Store for dynamic footer updates
 local hunk_starts = nil -- Array of hunk start line numbers
 
 -- Calculate hunk start positions from diff data
@@ -38,68 +39,16 @@ local function calculate_hunk_starts(diff_data)
 	return hunks
 end
 
--- Create the command footer window
-local function create_footer_window(col, total_width, row)
-	-- Define the commands to display
-	local commands = {
-		{ key = "q/Esc", desc = "close" },
-		{ key = "n", desc = "next hunk" },
-		{ key = "p", desc = "prev hunk" },
-	}
-
-	-- Build the footer text with spacing
-	local parts = {}
-	for _, cmd in ipairs(commands) do
-		table.insert(parts, cmd.key .. " " .. cmd.desc)
-	end
-	local footer_text = table.concat(parts, "  ")
-
-	-- Center the text within the total width
-	local padding = math.floor((total_width - #footer_text) / 2)
-	local centered_text = string.rep(" ", padding) .. footer_text
-
-	-- Create footer buffer
-	footer_buf = vim.api.nvim_create_buf(false, true)
-	vim.bo[footer_buf].buftype = "nofile"
-	vim.bo[footer_buf].bufhidden = "wipe"
-	vim.bo[footer_buf].modifiable = true
-	vim.api.nvim_buf_set_lines(footer_buf, 0, -1, false, { centered_text })
-	vim.bo[footer_buf].modifiable = false
-
-	-- Apply highlighting for keys and descriptions
-	local col_offset = padding
-	for _, cmd in ipairs(commands) do
-		-- Highlight the key
-		vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Special", 0, col_offset, col_offset + #cmd.key)
-		col_offset = col_offset + #cmd.key + 1 -- +1 for space after key
-
-		-- Highlight the description
-		vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Comment", 0, col_offset, col_offset + #cmd.desc)
-		col_offset = col_offset + #cmd.desc + 2 -- +2 for double space separator
-	end
-
-	-- Create footer window (borderless, non-focusable)
-	footer_win = vim.api.nvim_open_win(footer_buf, false, {
-		relative = "editor",
-		width = total_width,
-		height = 1,
-		col = col,
-		row = row,
-		style = "minimal",
-		border = "none",
-		focusable = false,
-	})
-end
-
 -- Find the index of the hunk containing the cursor
+-- Returns 0 if cursor is before the first hunk
 local function find_current_hunk_index()
 	if not hunk_starts or #hunk_starts == 0 then
-		return 1
+		return 0
 	end
 
 	local current_win = vim.api.nvim_get_current_win()
 	if current_win ~= left_win and current_win ~= right_win then
-		return 1
+		return 0
 	end
 
 	local cursor = vim.api.nvim_win_get_cursor(current_win)
@@ -112,7 +61,138 @@ local function find_current_hunk_index()
 		end
 	end
 
-	return 1
+	-- Cursor is before the first hunk
+	return 0
+end
+
+-- Generate footer content with commands and hunk status
+local function generate_footer_content(total_width)
+	local commands = {
+		{ key = "q/Esc", desc = "close" },
+		{ key = "n", desc = "next hunk" },
+		{ key = "p", desc = "prev hunk" },
+	}
+
+	-- Build command parts
+	local parts = {}
+	for _, cmd in ipairs(commands) do
+		table.insert(parts, cmd.key .. " " .. cmd.desc)
+	end
+	local commands_text = table.concat(parts, "  ")
+
+	-- Build hunk status
+	local hunk_status
+	if not hunk_starts or #hunk_starts == 0 then
+		hunk_status = "No hunks"
+	else
+		local current_idx = find_current_hunk_index()
+		hunk_status = string.format("Hunk %d/%d", current_idx, #hunk_starts)
+	end
+
+	local separator = "  │  "
+	local footer_text = commands_text .. separator .. hunk_status
+
+	-- Center the text within the total width
+	local padding = math.floor((total_width - #footer_text) / 2)
+	local centered_text = string.rep(" ", padding) .. footer_text
+
+	return {
+		text = centered_text,
+		commands = commands,
+		padding = padding,
+		commands_text_len = #commands_text,
+		separator_len = #separator,
+		hunk_status = hunk_status,
+	}
+end
+
+-- Update the footer with current hunk status
+local function update_footer_status()
+	if not footer_buf or not vim.api.nvim_buf_is_valid(footer_buf) then
+		return
+	end
+	if not footer_total_width then
+		return
+	end
+
+	local content = generate_footer_content(footer_total_width)
+
+	-- Update footer buffer content
+	vim.bo[footer_buf].modifiable = true
+	vim.api.nvim_buf_set_lines(footer_buf, 0, -1, false, { content.text })
+	vim.bo[footer_buf].modifiable = false
+
+	-- Clear existing highlights and reapply
+	vim.api.nvim_buf_clear_namespace(footer_buf, diffy_namespace, 0, -1)
+
+	-- Highlight commands (keys and descriptions)
+	local col_offset = content.padding
+	for _, cmd in ipairs(content.commands) do
+		-- Highlight the key
+		vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Special", 0, col_offset, col_offset + #cmd.key)
+		col_offset = col_offset + #cmd.key + 1 -- +1 for space after key
+
+		-- Highlight the description
+		vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Comment", 0, col_offset, col_offset + #cmd.desc)
+		col_offset = col_offset + #cmd.desc + 2 -- +2 for double space separator
+	end
+
+	-- Highlight separator (the "│" character)
+	local separator_start = content.padding + content.commands_text_len + 2 -- +2 for "  " before separator
+	vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Comment", 0, separator_start, separator_start + 3) -- "│" is 3 bytes in UTF-8
+
+	-- Highlight hunk status
+	local hunk_status_start = content.padding + content.commands_text_len + content.separator_len
+	vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Title", 0, hunk_status_start, hunk_status_start + #content.hunk_status)
+end
+
+-- Create the command footer window
+local function create_footer_window(col, total_width, row)
+	-- Store total width for dynamic updates
+	footer_total_width = total_width
+
+	-- Generate initial footer content
+	local content = generate_footer_content(total_width)
+
+	-- Create footer buffer
+	footer_buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[footer_buf].buftype = "nofile"
+	vim.bo[footer_buf].bufhidden = "wipe"
+	vim.bo[footer_buf].modifiable = true
+	vim.api.nvim_buf_set_lines(footer_buf, 0, -1, false, { content.text })
+	vim.bo[footer_buf].modifiable = false
+
+	-- Apply highlighting for keys and descriptions
+	local col_offset = content.padding
+	for _, cmd in ipairs(content.commands) do
+		-- Highlight the key
+		vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Special", 0, col_offset, col_offset + #cmd.key)
+		col_offset = col_offset + #cmd.key + 1 -- +1 for space after key
+
+		-- Highlight the description
+		vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Comment", 0, col_offset, col_offset + #cmd.desc)
+		col_offset = col_offset + #cmd.desc + 2 -- +2 for double space separator
+	end
+
+	-- Highlight separator (the "│" character)
+	local separator_start = content.padding + content.commands_text_len + 2 -- +2 for "  " before separator
+	vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Comment", 0, separator_start, separator_start + 3) -- "│" is 3 bytes in UTF-8
+
+	-- Highlight hunk status
+	local hunk_status_start = content.padding + content.commands_text_len + content.separator_len
+	vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Title", 0, hunk_status_start, hunk_status_start + #content.hunk_status)
+
+	-- Create footer window (borderless, non-focusable)
+	footer_win = vim.api.nvim_open_win(footer_buf, false, {
+		relative = "editor",
+		width = total_width,
+		height = 1,
+		col = col,
+		row = row,
+		style = "minimal",
+		border = "none",
+		focusable = false,
+	})
 end
 
 -- Open the diff viewer window
@@ -218,13 +298,13 @@ function M.close_diff_window()
 	right_buf = nil
 	footer_win = nil
 	footer_buf = nil
+	footer_total_width = nil
 	hunk_starts = nil
 end
 
 -- Jump to next hunk
 function M.jump_to_next_hunk()
 	if not hunk_starts or #hunk_starts == 0 then
-		vim.notify("No hunks to navigate", vim.log.levels.WARN)
 		return
 	end
 
@@ -235,20 +315,7 @@ function M.jump_to_next_hunk()
 	local current_win = vim.api.nvim_get_current_win()
 	if current_win == left_win or current_win == right_win then
 		vim.api.nvim_win_set_cursor(current_win, { target_line, 0 })
-		-- Verify cursor was actually set
-		local actual_cursor = vim.api.nvim_win_get_cursor(current_win)
-		vim.notify(
-			string.format(
-				"Hunk %d/%d - jumped to buffer line %d (actual: %d)",
-				next_idx,
-				#hunk_starts,
-				target_line,
-				actual_cursor[1]
-			),
-			vim.log.levels.INFO
-		)
-	else
-		vim.notify("Window mismatch - not in diff window", vim.log.levels.WARN)
+		update_footer_status()
 	end
 end
 
@@ -259,12 +326,19 @@ function M.jump_to_prev_hunk()
 	end
 
 	local current_idx = find_current_hunk_index()
-	local prev_idx = ((current_idx - 2) % #hunk_starts) + 1
+	-- Handle index 0 (before first hunk) and index 1 (at first hunk) -> go to last hunk
+	local prev_idx
+	if current_idx <= 1 then
+		prev_idx = #hunk_starts
+	else
+		prev_idx = current_idx - 1
+	end
 	local target_line = hunk_starts[prev_idx]
 
 	local current_win = vim.api.nvim_get_current_win()
 	if current_win == left_win or current_win == right_win then
 		vim.api.nvim_win_set_cursor(current_win, { target_line, 0 })
+		update_footer_status()
 	end
 end
 
@@ -351,6 +425,7 @@ function M.setup_scroll_sync()
 		buffer = left_buf,
 		callback = function()
 			sync_scroll(left_win, right_win)
+			update_footer_status()
 		end,
 	})
 
@@ -358,6 +433,7 @@ function M.setup_scroll_sync()
 		buffer = right_buf,
 		callback = function()
 			sync_scroll(right_win, left_win)
+			update_footer_status()
 		end,
 	})
 end
