@@ -19,16 +19,6 @@ function M.setup(opts)
     nargs = '?',
     desc = 'Open diff viewer for current file or specified target'
   })
-
-  -- Key mappings for closing diff windows
-  vim.api.nvim_create_autocmd('FileType', {
-    pattern = 'diffy',
-    callback = function()
-      vim.keymap.set('n', 'q', M.close_diff, { buffer = true, silent = true })
-      vim.keymap.set('n', '<Esc>', M.close_diff, { buffer = true, silent = true })
-      vim.keymap.set('n', '<C-c>', M.close_diff, { buffer = true, silent = true })
-    end
-  })
 end
 
 -- Open diff viewer

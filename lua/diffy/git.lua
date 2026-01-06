@@ -2,8 +2,6 @@ local M = {}
 
 -- Get diff data for a file
 function M.get_diff(file_path, target)
-  local Job = require('plenary.job')
-
   if vim.fn.filereadable(file_path) == 0 then
     vim.notify('File does not exist: ' .. file_path, vim.log.levels.ERROR)
     return nil
@@ -97,8 +95,20 @@ function M.parse_and_align_diff(diff_text)
       -- Parse hunk header to get line numbers
       local old_start = line:match('@@ %-(%d+)')
       local new_start = line:match('%+(%d+)')
-      left_num = tonumber(old_start) - 1
-      right_num = tonumber(new_start) - 1
+      
+      if old_start and new_start then
+        -- If this is not the first hunk (display_line > 0), add a separator line
+        if display_line > 0 then
+          display_line = display_line + 1
+          table.insert(left_content, '──────────────────────────────────────────────────')
+          table.insert(right_content, '──────────────────────────────────────────────────')
+          table.insert(left_line_info, { num = nil, type = 'separator' })
+          table.insert(right_line_info, { num = nil, type = 'separator' })
+        end
+
+        left_num = tonumber(old_start) - 1
+        right_num = tonumber(new_start) - 1
+      end
     elseif not (line:match('^%-%-%-') or line:match('^%+%+%+') or line:match('^diff') or line:match('^index')) then
       local prefix = line:sub(1, 1)
       local content = line:sub(2)

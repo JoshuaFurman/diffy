@@ -1,205 +1,376 @@
 local M = {}
 
-local diffy_namespace = vim.api.nvim_create_namespace('diffy')
+local diffy_namespace = vim.api.nvim_create_namespace("diffy")
 
 -- Window handles
 local left_win = nil
 local right_win = nil
 local left_buf = nil
 local right_buf = nil
+local footer_win = nil
+local footer_buf = nil
+local hunk_starts = nil -- Array of hunk start line numbers
+
+-- Calculate hunk start positions from diff data
+-- Detects "logical hunks" - contiguous sequences of changes separated by context
+local function calculate_hunk_starts(diff_data)
+	if not diff_data or not diff_data.left_line_info then
+		return {}
+	end
+
+	local hunks = {}
+	local in_change = false
+
+	for i, info in ipairs(diff_data.left_line_info) do
+		-- A line is a "change" if it's a remove or empty (empty = add on right side)
+		local is_change = info.type == "remove" or info.type == "empty"
+
+		if is_change and not in_change then
+			-- Starting a new change region = new hunk
+			table.insert(hunks, i)
+			in_change = true
+		elseif not is_change then
+			-- Context or separator line = end of change region
+			in_change = false
+		end
+	end
+
+	return hunks
+end
+
+-- Create the command footer window
+local function create_footer_window(col, total_width, row)
+	-- Define the commands to display
+	local commands = {
+		{ key = "q/Esc", desc = "close" },
+		{ key = "n", desc = "next hunk" },
+		{ key = "p", desc = "prev hunk" },
+	}
+
+	-- Build the footer text with spacing
+	local parts = {}
+	for _, cmd in ipairs(commands) do
+		table.insert(parts, cmd.key .. " " .. cmd.desc)
+	end
+	local footer_text = table.concat(parts, "  ")
+
+	-- Center the text within the total width
+	local padding = math.floor((total_width - #footer_text) / 2)
+	local centered_text = string.rep(" ", padding) .. footer_text
+
+	-- Create footer buffer
+	footer_buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[footer_buf].buftype = "nofile"
+	vim.bo[footer_buf].bufhidden = "wipe"
+	vim.bo[footer_buf].modifiable = true
+	vim.api.nvim_buf_set_lines(footer_buf, 0, -1, false, { centered_text })
+	vim.bo[footer_buf].modifiable = false
+
+	-- Apply highlighting for keys and descriptions
+	local col_offset = padding
+	for _, cmd in ipairs(commands) do
+		-- Highlight the key
+		vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Special", 0, col_offset, col_offset + #cmd.key)
+		col_offset = col_offset + #cmd.key + 1 -- +1 for space after key
+
+		-- Highlight the description
+		vim.api.nvim_buf_add_highlight(footer_buf, diffy_namespace, "Comment", 0, col_offset, col_offset + #cmd.desc)
+		col_offset = col_offset + #cmd.desc + 2 -- +2 for double space separator
+	end
+
+	-- Create footer window (borderless, non-focusable)
+	footer_win = vim.api.nvim_open_win(footer_buf, false, {
+		relative = "editor",
+		width = total_width,
+		height = 1,
+		col = col,
+		row = row,
+		style = "minimal",
+		border = "none",
+		focusable = false,
+	})
+end
+
+-- Find the index of the hunk containing the cursor
+local function find_current_hunk_index()
+	if not hunk_starts or #hunk_starts == 0 then
+		return 1
+	end
+
+	local current_win = vim.api.nvim_get_current_win()
+	if current_win ~= left_win and current_win ~= right_win then
+		return 1
+	end
+
+	local cursor = vim.api.nvim_win_get_cursor(current_win)
+	local cursor_line = cursor[1]
+
+	-- Find hunk containing cursor (iterate backwards)
+	for i = #hunk_starts, 1, -1 do
+		if cursor_line >= hunk_starts[i] then
+			return i
+		end
+	end
+
+	return 1
+end
 
 -- Open the diff viewer window
 function M.open_diff_window(diff_data)
-  -- Close any existing diff windows
-  M.close_diff_window()
+	-- Close any existing diff windows
+	M.close_diff_window()
 
-  -- Calculate window dimensions
-  local width = math.floor(vim.o.columns * 0.9)
-  local height = math.floor(vim.o.lines * 0.85)
-  local col = math.floor((vim.o.columns - width) / 2)
-  local row = math.floor((vim.o.lines - height) / 2)
-  
-  local content_width = math.floor(width / 2) - 2
+	-- Calculate window dimensions
+	local width = math.floor(vim.o.columns * 0.9)
+	local total_height = math.floor(vim.o.lines * 0.85)
+	local footer_height = 1
+	local height = total_height - footer_height - 1 -- -1 for spacing between panels and footer
+	local col = math.floor((vim.o.columns - width) / 2)
+	local row = math.floor((vim.o.lines - total_height) / 2)
 
-  -- Get current filetype for syntax
-  local ft = vim.bo.filetype
+	local content_width = math.floor(width / 2) - 2
 
-  -- Create left content buffer
-  left_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[left_buf].buftype = 'nofile'
-  vim.bo[left_buf].bufhidden = 'wipe'
-  vim.bo[left_buf].filetype = ft
-  vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, diff_data.left_content)
+	-- Get current filetype for syntax
+	local ft = vim.bo.filetype
 
-  -- Create right content buffer
-  right_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[right_buf].buftype = 'nofile'
-  vim.bo[right_buf].bufhidden = 'wipe'
-  vim.bo[right_buf].filetype = ft
-  vim.api.nvim_buf_set_lines(right_buf, 0, -1, false, diff_data.right_content)
+	-- Create left content buffer
+	left_buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[left_buf].buftype = "nofile"
+	vim.bo[left_buf].bufhidden = "wipe"
+	vim.bo[left_buf].filetype = ft
+	vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, diff_data.left_content)
 
-  -- Create left content window
-  left_win = vim.api.nvim_open_win(left_buf, false, {
-    relative = 'editor',
-    width = content_width,
-    height = height,
-    col = col,
-    row = row,
-    style = 'minimal',
-    border = 'rounded',
-    title = ' Original ',
-    title_pos = 'center'
-  })
-  vim.wo[left_win].number = false
-  vim.wo[left_win].wrap = false
+	-- Create right content buffer
+	right_buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[right_buf].buftype = "nofile"
+	vim.bo[right_buf].bufhidden = "wipe"
+	vim.bo[right_buf].filetype = ft
+	vim.api.nvim_buf_set_lines(right_buf, 0, -1, false, diff_data.right_content)
 
-  -- Create right content window
-  right_win = vim.api.nvim_open_win(right_buf, true, {
-    relative = 'editor',
-    width = content_width,
-    height = height,
-    col = col + content_width + 2,
-    row = row,
-    style = 'minimal',
-    border = 'rounded',
-    title = ' Modified ',
-    title_pos = 'center'
-  })
-  vim.wo[right_win].number = false
-  vim.wo[right_win].wrap = false
+	-- Create left content window
+	left_win = vim.api.nvim_open_win(left_buf, false, {
+		relative = "editor",
+		width = content_width,
+		height = height,
+		col = col,
+		row = row,
+		style = "minimal",
+		border = "rounded",
+		title = " Original ",
+		title_pos = "center",
+	})
+	vim.wo[left_win].number = false
+	vim.wo[left_win].wrap = false
 
-  -- Apply highlighting and line numbers
-  M.apply_highlighting(left_buf, right_buf, diff_data)
-  M.apply_line_numbers(left_buf, right_buf, diff_data)
+	-- Create right content window
+	right_win = vim.api.nvim_open_win(right_buf, true, {
+		relative = "editor",
+		width = content_width,
+		height = height,
+		col = col + content_width + 2,
+		row = row,
+		style = "minimal",
+		border = "rounded",
+		title = " Modified ",
+		title_pos = "center",
+	})
+	vim.wo[right_win].number = false
+	vim.wo[right_win].wrap = false
 
-  -- Set up synchronized scrolling
-  M.setup_scroll_sync()
+	-- Apply highlighting and line numbers
+	M.apply_highlighting(left_buf, right_buf, diff_data)
+	M.apply_line_numbers(left_buf, right_buf, diff_data)
 
-  -- Set up keymaps
-  M.setup_keymaps()
+	-- Calculate hunk positions for navigation
+	hunk_starts = calculate_hunk_starts(diff_data)
+
+	-- Set up synchronized scrolling
+	M.setup_scroll_sync()
+
+	-- Set up keymaps
+	M.setup_keymaps()
+
+	-- Create command footer
+	local footer_row = row + height + 2 -- +2 to account for border
+	create_footer_window(col, width, footer_row)
 end
 
 -- Close the diff viewer
 function M.close_diff_window()
-  local wins = {left_win, right_win}
-  local bufs = {left_buf, right_buf}
-  
-  for _, win in ipairs(wins) do
-    if win and vim.api.nvim_win_is_valid(win) then
-      vim.api.nvim_win_close(win, true)
-    end
-  end
-  
-  for _, buf in ipairs(bufs) do
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-      vim.api.nvim_buf_delete(buf, { force = true })
-    end
-  end
-  
-  left_win = nil
-  right_win = nil
-  left_buf = nil
-  right_buf = nil
+	local wins = { left_win, right_win, footer_win }
+	local bufs = { left_buf, right_buf, footer_buf }
+
+	for _, win in ipairs(wins) do
+		if win and vim.api.nvim_win_is_valid(win) then
+			vim.api.nvim_win_close(win, true)
+		end
+	end
+
+	for _, buf in ipairs(bufs) do
+		if buf and vim.api.nvim_buf_is_valid(buf) then
+			vim.api.nvim_buf_delete(buf, { force = true })
+		end
+	end
+
+	left_win = nil
+	right_win = nil
+	left_buf = nil
+	right_buf = nil
+	footer_win = nil
+	footer_buf = nil
+	hunk_starts = nil
+end
+
+-- Jump to next hunk
+function M.jump_to_next_hunk()
+	if not hunk_starts or #hunk_starts == 0 then
+		vim.notify("No hunks to navigate", vim.log.levels.WARN)
+		return
+	end
+
+	local current_idx = find_current_hunk_index()
+	local next_idx = (current_idx % #hunk_starts) + 1
+	local target_line = hunk_starts[next_idx]
+
+	local current_win = vim.api.nvim_get_current_win()
+	if current_win == left_win or current_win == right_win then
+		vim.api.nvim_win_set_cursor(current_win, { target_line, 0 })
+		-- Verify cursor was actually set
+		local actual_cursor = vim.api.nvim_win_get_cursor(current_win)
+		vim.notify(
+			string.format(
+				"Hunk %d/%d - jumped to buffer line %d (actual: %d)",
+				next_idx,
+				#hunk_starts,
+				target_line,
+				actual_cursor[1]
+			),
+			vim.log.levels.INFO
+		)
+	else
+		vim.notify("Window mismatch - not in diff window", vim.log.levels.WARN)
+	end
+end
+
+-- Jump to previous hunk
+function M.jump_to_prev_hunk()
+	if not hunk_starts or #hunk_starts == 0 then
+		return
+	end
+
+	local current_idx = find_current_hunk_index()
+	local prev_idx = ((current_idx - 2) % #hunk_starts) + 1
+	local target_line = hunk_starts[prev_idx]
+
+	local current_win = vim.api.nvim_get_current_win()
+	if current_win == left_win or current_win == right_win then
+		vim.api.nvim_win_set_cursor(current_win, { target_line, 0 })
+	end
 end
 
 -- Apply syntax highlighting to diff content
 function M.apply_highlighting(left, right, diff_data)
-  -- Apply diff-specific highlighting
-  for _, line_num in ipairs(diff_data.left_highlights or {}) do
-    vim.api.nvim_buf_add_highlight(left, diffy_namespace, 'DiffDelete', line_num - 1, 0, -1)
-  end
-  
-  for _, line_num in ipairs(diff_data.right_highlights or {}) do
-    vim.api.nvim_buf_add_highlight(right, diffy_namespace, 'DiffAdd', line_num - 1, 0, -1)
-  end
+	-- Apply diff-specific highlighting
+	for _, line_num in ipairs(diff_data.left_highlights or {}) do
+		vim.api.nvim_buf_add_highlight(left, diffy_namespace, "DiffDelete", line_num - 1, 0, -1)
+	end
+
+	for _, line_num in ipairs(diff_data.right_highlights or {}) do
+		vim.api.nvim_buf_add_highlight(right, diffy_namespace, "DiffAdd", line_num - 1, 0, -1)
+	end
 end
 
 -- Apply line numbers as virtual text
 function M.apply_line_numbers(left, right, diff_data)
-  -- Apply line numbers to left buffer
-  for i, info in ipairs(diff_data.left_line_info or {}) do
-    local text
-    local hl
-    if info.type == 'context' then
-      text = string.format('  %4d │ ', info.num)
-      hl = 'LineNr'
-    elseif info.type == 'remove' then
-      text = string.format('- %4d │ ', info.num)
-      hl = 'DiffDelete'
-    else
-      text = '       │ '
-      hl = 'LineNr'
-    end
-    
-    vim.api.nvim_buf_set_extmark(left, diffy_namespace, i - 1, 0, {
-      virt_text = {{text, hl}},
-      virt_text_pos = 'inline',
-      priority = 100,
-    })
-  end
-  
-  -- Apply line numbers to right buffer
-  for i, info in ipairs(diff_data.right_line_info or {}) do
-    local text
-    local hl
-    if info.type == 'context' then
-      text = string.format('  %4d │ ', info.num)
-      hl = 'LineNr'
-    elseif info.type == 'add' then
-      text = string.format('+ %4d │ ', info.num)
-      hl = 'DiffAdd'
-    else
-      text = '       │ '
-      hl = 'LineNr'
-    end
-    
-    vim.api.nvim_buf_set_extmark(right, diffy_namespace, i - 1, 0, {
-      virt_text = {{text, hl}},
-      virt_text_pos = 'inline',
-      priority = 100,
-    })
-  end
+	-- Apply line numbers to left buffer
+	for i, info in ipairs(diff_data.left_line_info or {}) do
+		local text
+		local hl
+		if info.type == "context" then
+			text = string.format("  %4d │ ", info.num)
+			hl = "LineNr"
+		elseif info.type == "remove" then
+			text = string.format("- %4d │ ", info.num)
+			hl = "DiffDelete"
+		else
+			text = "       │ "
+			hl = "LineNr"
+		end
+
+		vim.api.nvim_buf_set_extmark(left, diffy_namespace, i - 1, 0, {
+			virt_text = { { text, hl } },
+			virt_text_pos = "inline",
+			priority = 100,
+		})
+	end
+
+	-- Apply line numbers to right buffer
+	for i, info in ipairs(diff_data.right_line_info or {}) do
+		local text
+		local hl
+		if info.type == "context" then
+			text = string.format("  %4d │ ", info.num)
+			hl = "LineNr"
+		elseif info.type == "add" then
+			text = string.format("+ %4d │ ", info.num)
+			hl = "DiffAdd"
+		else
+			text = "       │ "
+			hl = "LineNr"
+		end
+
+		vim.api.nvim_buf_set_extmark(right, diffy_namespace, i - 1, 0, {
+			virt_text = { { text, hl } },
+			virt_text_pos = "inline",
+			priority = 100,
+		})
+	end
 end
 
 -- Set up synchronized scrolling
 function M.setup_scroll_sync()
-  local function sync_scroll(source_win, target_win)
-    if not source_win or not vim.api.nvim_win_is_valid(source_win) then
-      return
-    end
-    if not target_win or not vim.api.nvim_win_is_valid(target_win) then
-      return
-    end
-    
-    local cursor = vim.api.nvim_win_get_cursor(source_win)
-    local topline = vim.fn.line('w0', source_win)
-    
-    pcall(vim.api.nvim_win_set_cursor, target_win, cursor)
-    pcall(vim.fn.winrestview, target_win, {topline = topline})
-  end
+	local function sync_scroll(source_win, target_win)
+		if not source_win or not vim.api.nvim_win_is_valid(source_win) then
+			return
+		end
+		if not target_win or not vim.api.nvim_win_is_valid(target_win) then
+			return
+		end
 
-  vim.api.nvim_create_autocmd({'CursorMoved', 'CursorMovedI'}, {
-    buffer = left_buf,
-    callback = function()
-      sync_scroll(left_win, right_win)
-    end
-  })
+		local cursor = vim.api.nvim_win_get_cursor(source_win)
+		local topline = vim.fn.line("w0", source_win)
 
-  vim.api.nvim_create_autocmd({'CursorMoved', 'CursorMovedI'}, {
-    buffer = right_buf,
-    callback = function()
-      sync_scroll(right_win, left_win)
-    end
-  })
+		-- Use nvim_win_call to execute in the context of the target window
+		vim.api.nvim_win_call(target_win, function()
+			pcall(vim.api.nvim_win_set_cursor, target_win, cursor)
+			pcall(vim.fn.winrestview, { topline = topline })
+		end)
+	end
+
+	vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
+		buffer = left_buf,
+		callback = function()
+			sync_scroll(left_win, right_win)
+		end,
+	})
+
+	vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
+		buffer = right_buf,
+		callback = function()
+			sync_scroll(right_win, left_win)
+		end,
+	})
 end
 
--- Set up keymaps for closing
+-- Set up keymaps for closing and navigation
 function M.setup_keymaps()
-  for _, buf in ipairs({left_buf, right_buf}) do
-    vim.keymap.set('n', 'q', M.close_diff_window, { buffer = buf, silent = true })
-    vim.keymap.set('n', '<Esc>', M.close_diff_window, { buffer = buf, silent = true })
-    vim.keymap.set('n', '<C-c>', M.close_diff_window, { buffer = buf, silent = true })
-  end
+	for _, buf in ipairs({ left_buf, right_buf }) do
+		vim.keymap.set("n", "q", M.close_diff_window, { buffer = buf, silent = true })
+		vim.keymap.set("n", "<Esc>", M.close_diff_window, { buffer = buf, silent = true })
+		vim.keymap.set("n", "<C-c>", M.close_diff_window, { buffer = buf, silent = true })
+		vim.keymap.set("n", "n", M.jump_to_next_hunk, { buffer = buf, silent = true })
+		vim.keymap.set("n", "p", M.jump_to_prev_hunk, { buffer = buf, silent = true })
+	end
 end
 
 return M
