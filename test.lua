@@ -51,6 +51,72 @@ index 1234567..abcdef0 100644
 	print("✓ Git parsing test passed")
 end
 
+local function test_stage_hunk_patch_selection()
+	print("Testing stage hunk patch selection...")
+
+	local mock_diff = [[
+diff --git a/test.txt b/test.txt
+index 1234567..abcdef0 100644
+--- a/test.txt
++++ b/test.txt
+@@ -1,3 +1,4 @@
+ line 1
+-line 2
++modified line 2
+ line 3
++new line 4
+]]
+
+	local zero_context_diff = [[
+diff --git a/test.txt b/test.txt
+index 1234567..abcdef0 100644
+--- a/test.txt
++++ b/test.txt
+@@ -2 +2 @@
+-line 2
++modified line 2
+@@ -3,0 +4 @@
++new line 4
+]]
+
+	local git = require("diffy.git")
+	local diff_data = git.parse_and_align_diff(mock_diff)
+	local parsed_patch = git.parse_patch_hunks(zero_context_diff)
+
+	local modified_hunk = git.get_display_hunk(diff_data, 2)
+	local modified_patch_hunks = git.find_matching_patch_hunks(modified_hunk, parsed_patch)
+	assert(#modified_patch_hunks == 1, "Expected to find patch hunk for modified line")
+
+	local modified_patch = git.build_hunk_patch(parsed_patch, modified_patch_hunks)
+	assert(modified_patch:find("@@ %-2 %+2 @@", 1), "Expected modified hunk header")
+	assert(not modified_patch:find("new line 4", 1, true), "Did not expect addition hunk in patch")
+
+	local added_hunk = git.get_display_hunk(diff_data, 4)
+	local added_patch_hunks = git.find_matching_patch_hunks(added_hunk, parsed_patch)
+	assert(#added_patch_hunks == 1, "Expected to find patch hunk for added line")
+	assert(added_patch_hunks[1].new_start == 4, "Expected added hunk to start at new line 4")
+
+	local partial_display_hunk = {
+		old_start = 2,
+		old_end = 3,
+		new_start = 2,
+		new_end = 3,
+	}
+	local partial_patch = git.parse_patch_hunks([[
+diff --git a/test.txt b/test.txt
+index 1234567..abcdef0 100644
+--- a/test.txt
++++ b/test.txt
+@@ -3 +3 @@
+-line 3
++modified line 3
+]])
+	local partial_patch_hunks = git.find_matching_patch_hunks(partial_display_hunk, partial_patch)
+	assert(#partial_patch_hunks == 1, "Expected overlap matching for partially staged hunk")
+
+	print("✓ Stage hunk patch selection test passed")
+end
+
 local function test_ui_creation()
 	print("Testing UI creation...")
 
@@ -60,6 +126,30 @@ local function test_ui_creation()
 	assert(ui, "UI module failed to load")
 	assert(type(ui.open_diff_window) == "function", "open_diff_window is not a function")
 	assert(type(ui.close_diff_window) == "function", "close_diff_window is not a function")
+	assert(type(ui.stage_current_hunk) == "function", "stage_current_hunk is not a function")
+	assert(type(ui.toggle_current_hunk_stage) == "function", "toggle_current_hunk_stage is not a function")
+
+	vim.o.columns = 140
+	vim.o.lines = 40
+	ui.open_diff_window({
+		left_content = { "line 1", "old line", "line 3" },
+		right_content = { "line 1", "new line", "line 3" },
+		left_highlights = { 2 },
+		right_highlights = { 2 },
+		left_line_info = {
+			{ num = 1, type = "context" },
+			{ num = 2, type = "remove" },
+			{ num = 3, type = "context" },
+		},
+		right_line_info = {
+			{ num = 1, type = "context" },
+			{ num = 2, type = "add" },
+			{ num = 3, type = "context" },
+		},
+		word_diffs = {},
+	})
+	assert(vim.api.nvim_win_get_cursor(0)[1] == 2, "Expected cursor to start at the first hunk")
+	ui.close_diff_window()
 
 	print("✓ UI creation test passed")
 end
@@ -67,5 +157,6 @@ end
 -- Run tests
 print("Running diffy plugin tests...")
 test_git_parsing()
+test_stage_hunk_patch_selection()
 test_ui_creation()
 print("All tests passed! ✓")

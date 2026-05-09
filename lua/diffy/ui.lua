@@ -1,6 +1,7 @@
 local M = {}
 
 local diffy_namespace = vim.api.nvim_create_namespace("diffy")
+local hunk_namespace = vim.api.nvim_create_namespace("diffy_hunks")
 
 -- Window handles
 local left_win = nil
@@ -11,16 +12,29 @@ local footer_win = nil
 local footer_buf = nil
 local footer_total_width = nil -- Store for dynamic footer updates
 local hunk_starts = nil -- Array of hunk start line numbers
+local hunk_ranges = nil -- Array of hunk display ranges
+local hunk_states = nil -- Array of hunk staged states
+local active_diff_data = nil
+local update_footer_status = nil
 
--- Calculate hunk start positions from diff data
+local function setup_highlights()
+	vim.cmd("highlight default link DiffyHunkStaged DiffAdd")
+	vim.cmd("highlight default link DiffyHunkUnstaged WarningMsg")
+	vim.cmd("highlight default link DiffyHunkPartial DiffChange")
+	vim.cmd("highlight default link DiffyHunkReadonly Comment")
+	vim.cmd("highlight default link DiffyHunkUnknown Comment")
+end
+
+-- Calculate hunk display ranges from diff data
 -- Detects "logical hunks" - contiguous sequences of changes separated by context
-local function calculate_hunk_starts(diff_data)
+local function calculate_hunks(diff_data)
 	if not diff_data or not diff_data.left_line_info then
 		return {}
 	end
 
 	local hunks = {}
 	local in_change = false
+	local current_hunk = nil
 
 	for i, info in ipairs(diff_data.left_line_info) do
 		-- A line is a "change" if it's a remove or empty (empty = add on right side)
@@ -28,21 +42,88 @@ local function calculate_hunk_starts(diff_data)
 
 		if is_change and not in_change then
 			-- Starting a new change region = new hunk
-			table.insert(hunks, i)
+			current_hunk = { start = i, stop = i }
 			in_change = true
-		elseif not is_change then
+		elseif is_change then
+			current_hunk.stop = i
+		elseif not is_change and current_hunk then
 			-- Context or separator line = end of change region
+			table.insert(hunks, current_hunk)
+			current_hunk = nil
 			in_change = false
 		end
+	end
+
+	if current_hunk then
+		table.insert(hunks, current_hunk)
 	end
 
 	return hunks
 end
 
+local function get_hunk_starts(hunks)
+	local starts = {}
+
+	for _, hunk in ipairs(hunks or {}) do
+		table.insert(starts, hunk.start)
+	end
+
+	return starts
+end
+
+local function get_hunk_state_label(state)
+	if state == "staged" then
+		return "staged", "DiffyHunkStaged"
+	elseif state == "unstaged" then
+		return "unstaged", "DiffyHunkUnstaged"
+	elseif state == "partial" then
+		return "partial", "DiffyHunkPartial"
+	elseif state == "readonly" then
+		return "read-only", "DiffyHunkReadonly"
+	end
+
+	return "unknown", "DiffyHunkUnknown"
+end
+
+local function refresh_hunk_states()
+	if not active_diff_data or not hunk_starts then
+		hunk_states = {}
+		return
+	end
+
+	local git = require("diffy.git")
+	hunk_states = git.get_hunk_states(active_diff_data, hunk_starts)
+end
+
+local function apply_hunk_indicators()
+	if not hunk_ranges then
+		return
+	end
+
+	for _, buf in ipairs({ left_buf, right_buf }) do
+		if buf and vim.api.nvim_buf_is_valid(buf) then
+			vim.api.nvim_buf_clear_namespace(buf, hunk_namespace, 0, -1)
+		end
+	end
+
+	for i, hunk in ipairs(hunk_ranges) do
+		local label, hl = get_hunk_state_label(hunk_states and hunk_states[i])
+		local virt_text = { { " [" .. label .. "]", hl } }
+
+		if right_buf and vim.api.nvim_buf_is_valid(right_buf) then
+			vim.api.nvim_buf_set_extmark(right_buf, hunk_namespace, hunk.start - 1, 0, {
+				virt_text = virt_text,
+				virt_text_pos = "right_align",
+				priority = 120,
+			})
+		end
+	end
+end
+
 -- Find the index of the hunk containing the cursor
 -- Returns 0 if cursor is before the first hunk
-local function find_current_hunk_index()
-	if not hunk_starts or #hunk_starts == 0 then
+local function find_current_hunk_index(strict)
+	if not hunk_ranges or #hunk_ranges == 0 then
 		return 0
 	end
 
@@ -55,8 +136,9 @@ local function find_current_hunk_index()
 	local cursor_line = cursor[1]
 
 	-- Find hunk containing cursor (iterate backwards)
-	for i = #hunk_starts, 1, -1 do
-		if cursor_line >= hunk_starts[i] then
+	for i = #hunk_ranges, 1, -1 do
+		local hunk = hunk_ranges[i]
+		if cursor_line >= hunk.start and (not strict or cursor_line <= hunk.stop) then
 			return i
 		end
 	end
@@ -65,12 +147,33 @@ local function find_current_hunk_index()
 	return 0
 end
 
+local function focus_hunk(index)
+	if not hunk_starts or not hunk_starts[index] then
+		return
+	end
+
+	local target_line = hunk_starts[index]
+
+	for _, win in ipairs({ left_win, right_win }) do
+		if win and vim.api.nvim_win_is_valid(win) then
+			pcall(vim.api.nvim_win_set_cursor, win, { target_line, 0 })
+		end
+	end
+
+	if right_win and vim.api.nvim_win_is_valid(right_win) then
+		vim.api.nvim_set_current_win(right_win)
+	end
+
+	update_footer_status()
+end
+
 -- Generate footer content with commands and hunk status
 local function generate_footer_content(total_width)
 	local commands = {
 		{ key = "q/Esc", desc = "close" },
 		{ key = "n", desc = "next hunk" },
 		{ key = "p", desc = "prev hunk" },
+		{ key = "a", desc = "toggle stage" },
 	}
 
 	-- Build command parts
@@ -86,14 +189,16 @@ local function generate_footer_content(total_width)
 		hunk_status = "No hunks"
 	else
 		local current_idx = find_current_hunk_index()
-		hunk_status = string.format("Hunk %d/%d", current_idx, #hunk_starts)
+		local state = hunk_states and hunk_states[current_idx]
+		local label = get_hunk_state_label(state)
+		hunk_status = string.format("Hunk %d/%d [%s]", current_idx, #hunk_starts, label)
 	end
 
 	local separator = "  │  "
 	local footer_text = commands_text .. separator .. hunk_status
 
 	-- Center the text within the total width
-	local padding = math.floor((total_width - #footer_text) / 2)
+	local padding = math.max(0, math.floor((total_width - #footer_text) / 2))
 	local centered_text = string.rep(" ", padding) .. footer_text
 
 	return {
@@ -107,7 +212,7 @@ local function generate_footer_content(total_width)
 end
 
 -- Update the footer with current hunk status
-local function update_footer_status()
+function update_footer_status()
 	if not footer_buf or not vim.api.nvim_buf_is_valid(footer_buf) then
 		return
 	end
@@ -199,6 +304,8 @@ end
 function M.open_diff_window(diff_data)
 	-- Close any existing diff windows
 	M.close_diff_window()
+	active_diff_data = diff_data
+	setup_highlights()
 
 	-- Calculate window dimensions
 	local width = math.floor(vim.o.columns * 0.9)
@@ -261,8 +368,11 @@ function M.open_diff_window(diff_data)
 	M.apply_highlighting(left_buf, right_buf, diff_data)
 	M.apply_line_numbers(left_buf, right_buf, diff_data)
 
-	-- Calculate hunk positions for navigation
-	hunk_starts = calculate_hunk_starts(diff_data)
+	-- Calculate hunk positions for navigation and staged state indicators
+	hunk_ranges = calculate_hunks(diff_data)
+	hunk_starts = get_hunk_starts(hunk_ranges)
+	refresh_hunk_states()
+	apply_hunk_indicators()
 
 	-- Set up synchronized scrolling
 	M.setup_scroll_sync()
@@ -273,6 +383,7 @@ function M.open_diff_window(diff_data)
 	-- Create command footer
 	local footer_row = row + height + 2 -- +2 to account for border
 	create_footer_window(col, width, footer_row)
+	focus_hunk(1)
 end
 
 -- Close the diff viewer
@@ -300,6 +411,9 @@ function M.close_diff_window()
 	footer_buf = nil
 	footer_total_width = nil
 	hunk_starts = nil
+	hunk_ranges = nil
+	hunk_states = nil
+	active_diff_data = nil
 end
 
 -- Jump to next hunk
@@ -310,12 +424,10 @@ function M.jump_to_next_hunk()
 
 	local current_idx = find_current_hunk_index()
 	local next_idx = (current_idx % #hunk_starts) + 1
-	local target_line = hunk_starts[next_idx]
 
 	local current_win = vim.api.nvim_get_current_win()
 	if current_win == left_win or current_win == right_win then
-		vim.api.nvim_win_set_cursor(current_win, { target_line, 0 })
-		update_footer_status()
+		focus_hunk(next_idx)
 	end
 end
 
@@ -333,14 +445,40 @@ function M.jump_to_prev_hunk()
 	else
 		prev_idx = current_idx - 1
 	end
-	local target_line = hunk_starts[prev_idx]
 
 	local current_win = vim.api.nvim_get_current_win()
 	if current_win == left_win or current_win == right_win then
-		vim.api.nvim_win_set_cursor(current_win, { target_line, 0 })
+		focus_hunk(prev_idx)
+	end
+end
+
+-- Toggle staging for the hunk under the cursor
+function M.toggle_current_hunk_stage()
+	if not hunk_starts or #hunk_starts == 0 then
+		vim.notify("No hunks to toggle", vim.log.levels.WARN)
+		return
+	end
+
+	local current_win = vim.api.nvim_get_current_win()
+	if current_win ~= left_win and current_win ~= right_win then
+		return
+	end
+
+	local current_idx = find_current_hunk_index(true)
+	if current_idx == 0 then
+		vim.notify("No hunk under cursor", vim.log.levels.WARN)
+		return
+	end
+
+	local git = require("diffy.git")
+	if git.toggle_hunk_stage(active_diff_data, hunk_starts[current_idx]) then
+		refresh_hunk_states()
+		apply_hunk_indicators()
 		update_footer_status()
 	end
 end
+
+M.stage_current_hunk = M.toggle_current_hunk_stage
 
 -- Apply syntax highlighting to diff content
 function M.apply_highlighting(left, right, diff_data)
@@ -456,6 +594,7 @@ function M.setup_keymaps()
 		vim.keymap.set("n", "<C-c>", M.close_diff_window, { buffer = buf, silent = true })
 		vim.keymap.set("n", "n", M.jump_to_next_hunk, { buffer = buf, silent = true })
 		vim.keymap.set("n", "p", M.jump_to_prev_hunk, { buffer = buf, silent = true })
+		vim.keymap.set("n", "a", M.toggle_current_hunk_stage, { buffer = buf, silent = true })
 	end
 end
 

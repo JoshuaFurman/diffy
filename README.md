@@ -8,6 +8,8 @@ A Neovim plugin for displaying git diffs in a side-by-side floating window, simi
 - Synchronized scrolling between original and modified content
 - Syntax highlighting for the current file type
 - Easy to close with `q`, `<Esc>`, or `<C-c>`
+- Toggle staging for the current hunk with `a`
+- Visual hunk state labels for staged, unstaged, and partial hunks
 - Support for different diff targets (HEAD, staged, specific commits)
 
 ## Installation
@@ -50,6 +52,9 @@ When the diff window is open:
 - `q` - Close the diff window
 - `<Esc>` - Close the diff window
 - `<C-c>` - Close the diff window
+- `n` - Jump to the next hunk
+- `p` - Jump to the previous hunk
+- `a` - Toggle staging for the current hunk
 
 ## Configuration
 
