@@ -15,6 +15,8 @@ local hunk_starts = nil -- Array of hunk start line numbers
 local hunk_ranges = nil -- Array of hunk display ranges
 local hunk_states = nil -- Array of hunk staged states
 local active_diff_data = nil
+local source_win = nil
+local source_buf = nil
 local update_footer_status = nil
 
 local function setup_highlights()
@@ -167,10 +169,67 @@ local function focus_hunk(index)
 	update_footer_status()
 end
 
+local function find_source_window()
+	if source_win and vim.api.nvim_win_is_valid(source_win) then
+		return source_win
+	end
+
+	if not source_buf or not vim.api.nvim_buf_is_valid(source_buf) then
+		return nil
+	end
+
+	for _, win in ipairs(vim.api.nvim_list_wins()) do
+		if vim.api.nvim_win_get_buf(win) == source_buf then
+			return win
+		end
+	end
+
+	return nil
+end
+
+local function get_source_line(display_line)
+	if not active_diff_data or not active_diff_data.right_line_info then
+		return nil
+	end
+
+	local right_line_info = active_diff_data.right_line_info
+	local line_info = right_line_info[display_line]
+	if line_info and line_info.num then
+		return line_info.num
+	end
+
+	for line = display_line + 1, #right_line_info do
+		line_info = right_line_info[line]
+		if line_info and line_info.num then
+			return line_info.num
+		end
+	end
+
+	for line = display_line - 1, 1, -1 do
+		line_info = right_line_info[line]
+		if line_info and line_info.num then
+			return line_info.num + 1
+		end
+	end
+
+	return 1
+end
+
+local function clamp_cursor(buf, line, col)
+	local line_count = vim.api.nvim_buf_line_count(buf)
+	line = math.max(1, math.min(line or 1, line_count))
+
+	local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
+	col = math.max(0, math.min(col or 0, #text))
+
+	return { line, col }
+end
+
 -- Generate footer content with commands and hunk status
 local function generate_footer_content(total_width)
 	local commands = {
 		{ key = "q/Esc", desc = "close" },
+		{ key = "<CR>", desc = "jump" },
 		{ key = "n", desc = "next hunk" },
 		{ key = "p", desc = "prev hunk" },
 		{ key = "a", desc = "toggle stage" },
@@ -305,6 +364,8 @@ function M.open_diff_window(diff_data)
 	-- Close any existing diff windows
 	M.close_diff_window()
 	active_diff_data = diff_data
+	source_win = vim.api.nvim_get_current_win()
+	source_buf = vim.api.nvim_get_current_buf()
 	setup_highlights()
 
 	-- Calculate window dimensions
@@ -414,6 +475,53 @@ function M.close_diff_window()
 	hunk_ranges = nil
 	hunk_states = nil
 	active_diff_data = nil
+	source_win = nil
+	source_buf = nil
+end
+
+-- Jump from the diff view to the matching location in the source buffer.
+function M.jump_to_source_location()
+	if not active_diff_data then
+		return
+	end
+
+	local current_win = vim.api.nvim_get_current_win()
+	if current_win ~= left_win and current_win ~= right_win then
+		return
+	end
+
+	local cursor = vim.api.nvim_win_get_cursor(current_win)
+	local target_line = get_source_line(cursor[1])
+	if not target_line then
+		vim.notify("No source location for this diff line", vim.log.levels.WARN)
+		return
+	end
+
+	local target_win = find_source_window()
+	local target_buf = source_buf
+	local target_file = active_diff_data.file_path
+	local target_col = cursor[2]
+
+	if target_win then
+		vim.api.nvim_set_current_win(target_win)
+	end
+
+	M.close_diff_window()
+
+	if target_win and vim.api.nvim_win_is_valid(target_win) then
+		vim.api.nvim_set_current_win(target_win)
+	elseif target_buf and vim.api.nvim_buf_is_valid(target_buf) then
+		vim.api.nvim_set_current_buf(target_buf)
+	elseif target_file and target_file ~= "" then
+		vim.cmd("edit " .. vim.fn.fnameescape(target_file))
+	else
+		vim.notify("Source buffer is no longer available", vim.log.levels.WARN)
+		return
+	end
+
+	local buf = vim.api.nvim_get_current_buf()
+	local target_cursor = clamp_cursor(buf, target_line, target_col)
+	vim.api.nvim_win_set_cursor(0, target_cursor)
 end
 
 -- Jump to next hunk
@@ -592,6 +700,7 @@ function M.setup_keymaps()
 		vim.keymap.set("n", "q", M.close_diff_window, { buffer = buf, silent = true })
 		vim.keymap.set("n", "<Esc>", M.close_diff_window, { buffer = buf, silent = true })
 		vim.keymap.set("n", "<C-c>", M.close_diff_window, { buffer = buf, silent = true })
+		vim.keymap.set("n", "<CR>", M.jump_to_source_location, { buffer = buf, silent = true })
 		vim.keymap.set("n", "n", M.jump_to_next_hunk, { buffer = buf, silent = true })
 		vim.keymap.set("n", "p", M.jump_to_prev_hunk, { buffer = buf, silent = true })
 		vim.keymap.set("n", "a", M.toggle_current_hunk_stage, { buffer = buf, silent = true })

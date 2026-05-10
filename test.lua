@@ -120,17 +120,22 @@ end
 local function test_ui_creation()
 	print("Testing UI creation...")
 
-	-- This would require a running Neovim instance to test properly
-	-- For now, just test that the module loads
+	-- Exercise the floating UI enough to cover window creation and source jumps.
 	local ui = require("diffy.ui")
 	assert(ui, "UI module failed to load")
 	assert(type(ui.open_diff_window) == "function", "open_diff_window is not a function")
 	assert(type(ui.close_diff_window) == "function", "close_diff_window is not a function")
+	assert(type(ui.jump_to_source_location) == "function", "jump_to_source_location is not a function")
 	assert(type(ui.stage_current_hunk) == "function", "stage_current_hunk is not a function")
 	assert(type(ui.toggle_current_hunk_stage) == "function", "toggle_current_hunk_stage is not a function")
 
 	vim.o.columns = 140
 	vim.o.lines = 40
+
+	local source_win = vim.api.nvim_get_current_win()
+	local source_buf = vim.api.nvim_get_current_buf()
+	vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "line 1", "new line", "line 3" })
+
 	ui.open_diff_window({
 		left_content = { "line 1", "old line", "line 3" },
 		right_content = { "line 1", "new line", "line 3" },
@@ -149,7 +154,32 @@ local function test_ui_creation()
 		word_diffs = {},
 	})
 	assert(vim.api.nvim_win_get_cursor(0)[1] == 2, "Expected cursor to start at the first hunk")
-	ui.close_diff_window()
+
+	ui.jump_to_source_location()
+	assert(vim.api.nvim_get_current_win() == source_win, "Expected to return to the source window")
+	assert(vim.api.nvim_get_current_buf() == source_buf, "Expected to return to the source buffer")
+	assert(vim.api.nvim_win_get_cursor(0)[1] == 2, "Expected cursor to jump to source line 2")
+
+	vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "line 1", "line 3" })
+	ui.open_diff_window({
+		left_content = { "line 1", "deleted line", "line 3" },
+		right_content = { "line 1", "", "line 3" },
+		left_highlights = { 2 },
+		right_highlights = {},
+		left_line_info = {
+			{ num = 1, type = "context" },
+			{ num = 2, type = "remove" },
+			{ num = 3, type = "context" },
+		},
+		right_line_info = {
+			{ num = 1, type = "context" },
+			{ num = nil, type = "empty" },
+			{ num = 2, type = "context" },
+		},
+		word_diffs = {},
+	})
+	ui.jump_to_source_location()
+	assert(vim.api.nvim_win_get_cursor(0)[1] == 2, "Expected deleted line to jump to next source line")
 
 	print("✓ UI creation test passed")
 end

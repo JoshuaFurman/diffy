@@ -8,3 +8,5 @@ coverage/
 node_modules/
 dist/
 build/
+.codex/
+.agents/

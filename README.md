@@ -52,6 +52,7 @@ When the diff window is open:
 - `q` - Close the diff window
 - `<Esc>` - Close the diff window
 - `<C-c>` - Close the diff window
+- `<Enter>` - Jump to the selected location in the source buffer and close the diff window
 - `n` - Jump to the next hunk
 - `p` - Jump to the previous hunk
 - `a` - Toggle staging for the current hunk
