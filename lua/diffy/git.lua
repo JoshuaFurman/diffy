@@ -37,7 +37,7 @@ end
 -- Get git root directory
 function M.get_git_root(file_path)
   local Job = require('plenary.job')
-  
+
   local job = Job:new({
     command = 'git',
     args = { 'rev-parse', '--show-toplevel' },
@@ -45,7 +45,7 @@ function M.get_git_root(file_path)
   })
 
   local result = job:sync()
-  
+
   if job.code ~= 0 or #result == 0 then
     return nil
   end
@@ -56,7 +56,7 @@ end
 -- Get git diff output
 function M.get_git_diff(git_root, rel_path, target)
   local Job = require('plenary.job')
-  
+
   local args
   if target == 'staged' then
     args = { 'diff', '--cached', '--no-color', '--no-ext-diff', '-U999999', '--', rel_path }
@@ -67,7 +67,7 @@ function M.get_git_diff(git_root, rel_path, target)
     -- Default: compare HEAD to working directory
     args = { 'diff', '--no-color', '--no-ext-diff', '-U999999', 'HEAD', '--', rel_path }
   end
-  
+
   local job = Job:new({
     command = 'git',
     args = args,
@@ -75,7 +75,7 @@ function M.get_git_diff(git_root, rel_path, target)
   })
 
   local result = job:sync()
-  
+
   if #result == 0 then
     return nil
   end
@@ -543,49 +543,43 @@ function M.stage_hunk(diff_data, display_line)
   return M.toggle_hunk_stage(diff_data, display_line)
 end
 
--- Compute word-level diff between two lines
--- Returns table with left and right highlight ranges, or nil if no diff
+-- Diff characters rather than bytes so highlight boundaries never split UTF-8.
+local function split_characters(line)
+  local characters = vim.fn.split(line, '\\zs')
+  local offsets = { 0 }
+  for _, character in ipairs(characters) do
+    offsets[#offsets + 1] = offsets[#offsets] + #character
+  end
+  local text = #characters > 0 and table.concat(characters, '\n') .. '\n' or ''
+  return text, offsets
+end
+
+-- Return lists of zero-based, end-exclusive byte ranges on each side.
+-- Separate edits on a line stay separate instead of highlighting the text between them.
 function M.compute_word_diff(old_line, new_line)
   if old_line == new_line then
     return nil
   end
 
-  -- Find common prefix
-  local prefix_len = 0
-  local min_len = math.min(#old_line, #new_line)
-  while prefix_len < min_len do
-    if old_line:sub(prefix_len + 1, prefix_len + 1) == new_line:sub(prefix_len + 1, prefix_len + 1) then
-      prefix_len = prefix_len + 1
-    else
-      break
+  local old_text, old_offsets = split_characters(old_line)
+  local new_text, new_offsets = split_characters(new_line)
+  local hunks = vim.diff(old_text, new_text, { result_type = 'indices', algorithm = 'minimal' })
+  local result = { left = {}, right = {} }
+  for _, hunk in ipairs(hunks) do
+    if hunk[2] > 0 then
+      table.insert(result.left, {
+        start = old_offsets[hunk[1]],
+        stop = old_offsets[hunk[1] + hunk[2]],
+      })
+    end
+    if hunk[4] > 0 then
+      table.insert(result.right, {
+        start = new_offsets[hunk[3]],
+        stop = new_offsets[hunk[3] + hunk[4]],
+      })
     end
   end
-
-  -- Find common suffix (don't overlap with prefix)
-  local suffix_len = 0
-  local max_suffix = min_len - prefix_len
-  while suffix_len < max_suffix do
-    if old_line:sub(#old_line - suffix_len, #old_line - suffix_len) == new_line:sub(#new_line - suffix_len, #new_line - suffix_len) then
-      suffix_len = suffix_len + 1
-    else
-      break
-    end
-  end
-
-  local old_diff_start = prefix_len
-  local old_diff_end = #old_line - suffix_len
-  local new_diff_start = prefix_len
-  local new_diff_end = #new_line - suffix_len
-
-  -- Only return if there's actually a different region
-  if old_diff_start < old_diff_end or new_diff_start < new_diff_end then
-    return {
-      left = { start = old_diff_start, stop = old_diff_end },
-      right = { start = new_diff_start, stop = new_diff_end },
-    }
-  end
-
-  return nil
+  return result
 end
 
 -- Parse diff and create aligned content for side-by-side view
@@ -625,13 +619,7 @@ function M.parse_and_align_diff(diff_text)
         table.insert(left_highlights, display_line)
         table.insert(right_highlights, display_line)
 
-        -- Compute word-diff if both have non-empty content
-        if remove.content ~= '' and add.content ~= '' then
-          local wd = M.compute_word_diff(remove.content, add.content)
-          if wd then
-            word_diffs[display_line] = wd
-          end
-        end
+        word_diffs[display_line] = M.compute_word_diff(remove.content, add.content)
       elseif remove then
         -- Pure deletion - only left side has content
         table.insert(left_content, remove.content)
@@ -666,8 +654,14 @@ function M.parse_and_align_diff(diff_text)
         -- If this is not the first hunk (display_line > 0), add a separator line
         if display_line > 0 then
           display_line = display_line + 1
-          table.insert(left_content, '──────────────────────────────────────────────────')
-          table.insert(right_content, '──────────────────────────────────────────────────')
+          table.insert(
+            left_content,
+            '──────────────────────────────────────────────────'
+          )
+          table.insert(
+            right_content,
+            '──────────────────────────────────────────────────'
+          )
           table.insert(left_line_info, { num = nil, type = 'separator' })
           table.insert(right_line_info, { num = nil, type = 'separator' })
         end
@@ -675,7 +669,14 @@ function M.parse_and_align_diff(diff_text)
         left_num = tonumber(old_start) - 1
         right_num = tonumber(new_start) - 1
       end
-    elseif not (line:match('^%-%-%-') or line:match('^%+%+%+') or line:match('^diff') or line:match('^index')) then
+    elseif
+      not (
+        line:match('^%-%-%-')
+        or line:match('^%+%+%+')
+        or line:match('^diff')
+        or line:match('^index')
+      )
+    then
       local prefix = line:sub(1, 1)
       local content = line:sub(2)
 

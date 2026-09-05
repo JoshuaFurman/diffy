@@ -5,7 +5,8 @@ M.config = {
   width = 0.8,
   height = 0.8,
   border = 'rounded',
-  winblend = 10,
+  winblend = 0,
+  wrap = true,
 }
 
 -- Setup function
@@ -17,7 +18,7 @@ function M.setup(opts)
     M.open_diff(args.args)
   end, {
     nargs = '?',
-    desc = 'Open diff viewer for current file or specified target'
+    desc = 'Open diff viewer for current file or specified target',
   })
 end
 
